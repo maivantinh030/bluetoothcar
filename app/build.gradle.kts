@@ -67,4 +67,5 @@ dependencies {
     debugImplementation(libs.androidx.ui.test.manifest)
     // Thư viện mở rộng cho các biểu tượng như DirectionsCar
     implementation ("androidx.compose.material:material-icons-extended:1.6.8")
+    implementation ("androidx.navigation:navigation-compose:2.7.7")
 }

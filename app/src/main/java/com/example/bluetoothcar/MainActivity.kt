@@ -35,14 +35,19 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.scale
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.lifecycleScope
+import androidx.navigation.compose.NavHost
+import androidx.navigation.compose.composable
+import androidx.navigation.compose.rememberNavController
 import com.example.bluetoothcar.ui.theme.BluetoothCarTheme
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
@@ -81,7 +86,6 @@ class MainActivity : ComponentActivity() {
                             outputStream = socket.outputStream
                             withContext(Dispatchers.Main) {
                                 startConnectionMonitor()
-                                // Bỏ phần xoay màn hình
                             }
                         } catch (e: IOException) {
                             withContext(Dispatchers.Main) {
@@ -98,20 +102,31 @@ class MainActivity : ComponentActivity() {
 
         setContent {
             BluetoothCarTheme {
-                // Đảm bảo UI recompose khi isConnected thay đổi
-                val isConnectedState by isConnected
-                if (isConnectedState) {
-                    ControlScreen(
-                        onSendCommand = { command -> sendCommand(command) },
-                        onDisconnect = { disconnectDevice() }
-                    )
-                } else {
-                    val pairedDevices = getPairedDevices()
-                    BluetoothDeviceList(
-                        context = this@MainActivity,
-                        devices = pairedDevices,
-                        onDeviceSelected = { device -> connectToDevice(device) }
-                    )
+                // Thiết lập điều hướng
+                val navController = rememberNavController()
+                NavHost(navController = navController, startDestination = "device_list") {
+                    composable("device_list") {
+                        BluetoothDeviceList(
+                            context = this@MainActivity,
+                            devices = getPairedDevices(),
+                            onDeviceSelected = { device ->
+                                connectToDevice(device) {
+                                    // Khi kết nối thành công, chuyển sang ControlScreen
+                                    navController.navigate("control")
+                                }
+                            }
+                        )
+                    }
+                    composable("control") {
+                        ControlScreen(
+                            onSendCommand = { command -> sendCommand(command) },
+                            onDisconnect = {
+                                disconnectDevice()
+                                // Quay lại màn hình danh sách thiết bị
+                                navController.popBackStack()
+                            }
+                        )
+                    }
                 }
             }
         }
@@ -162,7 +177,7 @@ class MainActivity : ComponentActivity() {
         return pairedDevices?.toList() ?: emptyList()
     }
 
-    private fun connectToDevice(device: BluetoothDevice) {
+    private fun connectToDevice(device: BluetoothDevice, onSuccess: () -> Unit) {
         lifecycleScope.launch(Dispatchers.IO) {
             try {
                 val uuid = UUID.fromString("00001101-0000-1000-8000-00805F9B34FB") // UUID chuẩn cho HC-06
@@ -177,7 +192,7 @@ class MainActivity : ComponentActivity() {
                     isConnected.value = true
                     Toast.makeText(this@MainActivity, "Kết nối thành công!", Toast.LENGTH_SHORT).show()
                     startConnectionMonitor()
-                    // Bỏ phần xoay màn hình
+                    onSuccess() // Gọi callback để chuyển màn hình
                 }
             } catch (e: IOException) {
                 withContext(Dispatchers.Main) {
@@ -216,7 +231,6 @@ class MainActivity : ComponentActivity() {
             isConnected.value = false
 
             Toast.makeText(this, "Đã ngắt kết nối", Toast.LENGTH_SHORT).show()
-            // Bỏ phần xoay màn hình
         } catch (e: IOException) {
             Log.e("Bluetooth", "Lỗi khi ngắt kết nối: ${e.message}")
         }
@@ -241,7 +255,6 @@ class MainActivity : ComponentActivity() {
                     withContext(Dispatchers.Main) {
                         isConnected.value = false
                         Toast.makeText(this@MainActivity, "Mất kết nối Bluetooth", Toast.LENGTH_SHORT).show()
-                        // Bỏ phần xoay màn hình
                     }
                     break
                 }
@@ -261,10 +274,14 @@ fun BluetoothDeviceList(
     devices: List<BluetoothDevice>,
     onDeviceSelected: (BluetoothDevice) -> Unit
 ) {
-    val hasPermission = ContextCompat.checkSelfPermission(
-        context,
-        Manifest.permission.BLUETOOTH_CONNECT
-    ) == PackageManager.PERMISSION_GRANTED
+    // Đảm bảo màn hình ở chế độ dọc
+    val activity = LocalContext.current as? Activity
+    DisposableEffect(Unit) {
+        activity?.requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_PORTRAIT
+        onDispose {
+            // Không cần khôi phục vì đây là màn hình mặc định
+        }
+    }
 
     Column(
         modifier = Modifier
@@ -277,7 +294,6 @@ fun BluetoothDeviceList(
             style = MaterialTheme.typography.titleLarge,
             modifier = Modifier.padding(bottom = 16.dp)
         )
-
         LazyColumn(
             modifier = Modifier.fillMaxSize()
         ) {
@@ -291,7 +307,11 @@ fun BluetoothDeviceList(
                 ) {
                     Column(modifier = Modifier.padding(16.dp)) {
                         Text(
-                            text = if (hasPermission) device.name ?: "Unknown Device" else "Permission required",
+                            text = if (ContextCompat.checkSelfPermission(
+                                    context,
+                                    Manifest.permission.BLUETOOTH_CONNECT
+                                ) == PackageManager.PERMISSION_GRANTED
+                            ) device.name ?: "Unknown Device" else "Permission required",
                             style = MaterialTheme.typography.titleMedium
                         )
                         Text(
@@ -310,20 +330,110 @@ fun ControlScreen(
     onSendCommand: (String) -> Unit,
     onDisconnect: () -> Unit
 ) {
+    // Thay đổi hướng màn hình thành chế độ ngang khi vào ControlScreen
+    val context = LocalContext.current
+    DisposableEffect(Unit) {
+        (context as? Activity)?.requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_LANDSCAPE
+        onDispose {
+            // Khôi phục chế độ dọc khi thoát ControlScreen
+            (context as? Activity)?.requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_PORTRAIT
+        }
+    }
+
+    // Trạng thái cho từng nút
+    var isForwardPressed by remember { mutableStateOf(false) }
+    var isBackwardPressed by remember { mutableStateOf(false) }
+    var isLeftPressed by remember { mutableStateOf(false) }
+    var isRightPressed by remember { mutableStateOf(false) }
+    var isHornPressed by remember { mutableStateOf(false) }
+    var isLightOn by remember { mutableStateOf(false) }
+    var isSwitchOn by remember { mutableStateOf(false) }
+    // Xử lý gửi lệnh dựa trên trạng thái
+    LaunchedEffect(isForwardPressed) {
+        if (isForwardPressed) {
+            onSendCommand("F")
+        } else if (!isBackwardPressed) {
+            // Chỉ gửi "S" nếu cả Tiến và Lùi đều không được nhấn
+            onSendCommand("S")
+        }
+    }
+
+    LaunchedEffect(isBackwardPressed) {
+        if (isBackwardPressed) {
+            onSendCommand("B")
+        } else if (!isForwardPressed) {
+            // Chỉ gửi "S" nếu cả Tiến và Lùi đều không được nhấn
+            onSendCommand("S")
+        }
+    }
+
+    LaunchedEffect(isLeftPressed) {
+        if (isLeftPressed) {
+            onSendCommand("L")
+        } else {
+            // Khi thả nút Trái, kiểm tra trạng thái Tiến/Lùi
+            when {
+                isForwardPressed -> onSendCommand("F") // Tiếp tục Tiến nếu nút Tiến đang được nhấn
+                isBackwardPressed -> onSendCommand("B") // Tiếp tục Lùi nếu nút Lùi đang được nhấn
+                else -> onSendCommand("S") // Dừng nếu không có nút nào được nhấn
+            }
+        }
+    }
+
+    LaunchedEffect(isRightPressed) {
+        if (isRightPressed) {
+            onSendCommand("R")
+        } else {
+            // Khi thả nút Phải, kiểm tra trạng thái Tiến/Lùi
+            when {
+                isForwardPressed -> onSendCommand("F") // Tiếp tục Tiến nếu nút Tiến đang được nhấn
+                isBackwardPressed -> onSendCommand("B") // Tiếp tục Lùi nếu nút Lùi đang được nhấn
+                else -> onSendCommand("S") // Dừng nếu không có nút nào được nhấn
+            }
+        }
+    }
+
+    LaunchedEffect(isHornPressed) {
+        if (isHornPressed) {
+            onSendCommand("X")
+        }
+        else{
+            onSendCommand("x")
+            }
+    }
+
+    LaunchedEffect(isLightOn) {
+        if (isLightOn) {
+            onSendCommand("Y")
+            Log.d("Bluetooth", "Bật đèn, gửi lệnh Y")
+        } else {
+            onSendCommand("y")
+            Log.d("Bluetooth", "Tắt đèn, gửi lệnh y")
+        }
+    }
+    LaunchedEffect(isSwitchOn) {
+        if (isSwitchOn) {
+            onSendCommand("A")
+            Log.d("Bluetooth", "Switch bật, gửi lệnh A")
+        } else {
+            onSendCommand("N")
+            Log.d("Bluetooth", "Switch tắt, gửi lệnh N")
+        }
+    }
     Box(
         modifier = Modifier
             .fillMaxSize()
             .background(Color(0xFFE0F7FA))
             .padding(16.dp)
     ) {
-        // Bố cục chính: Chia thành 3 phần với tỷ lệ 2/5, 1/5, 2/5
+        // Bố cục chính: Chia thành 3 phần với tỷ lệ 4/11, 3/11, 4/11
         Row(
             modifier = Modifier
                 .fillMaxSize(),
             horizontalArrangement = Arrangement.SpaceEvenly,
             verticalAlignment = Alignment.CenterVertically
         ) {
-            // Phần 1: Nút Tiến và Lùi (chiếm 2/5 không gian)
+            // Phần 1: Nút Tiến và Lùi (chiếm 4/11 không gian)
             Column(
                 modifier = Modifier
                     .weight(4f)
@@ -332,11 +442,27 @@ fun ControlScreen(
                 horizontalAlignment = Alignment.CenterHorizontally
             ) {
                 Button(
-                    onClick = { onSendCommand("F") },
-                    onClickReleased = { onSendCommand("S") },
+                    onClick = { /* Xử lý qua pointerInput */ },
+                    onClickReleased = { /* Xử lý qua pointerInput */ },
                     modifier = Modifier
                         .size(width = 270.dp, height = 130.dp)
-                        ,
+                        .pointerInput(Unit) {
+                            awaitPointerEventScope {
+                                while (true) {
+                                    val event = awaitPointerEvent()
+                                    when {
+                                        event.changes.any { it.pressed && !isForwardPressed } -> {
+                                            isForwardPressed = true
+                                            Log.d("Bluetooth", "Nhấn nút Tiến")
+                                        }
+                                        event.changes.any { !it.pressed && isForwardPressed } -> {
+                                            isForwardPressed = false
+                                            Log.d("Bluetooth", "Thả nút Tiến, gửi lệnh dừng")
+                                        }
+                                    }
+                                }
+                            }
+                        },
                     colors = ButtonDefaults.buttonColors(containerColor = Color(0xFFB0BEC5))
                 ) {
                     Icon(
@@ -348,11 +474,28 @@ fun ControlScreen(
                 }
 
                 Button(
-                    onClick = { onSendCommand("B") },
-                    onClickReleased = { onSendCommand("S") },
+                    onClick = { /* Xử lý qua pointerInput */ },
+                    onClickReleased = { /* Xử lý qua pointerInput */ },
                     modifier = Modifier
                         .size(width = 270.dp, height = 130.dp)
-                        .clip(RoundedCornerShape(4.dp)),
+                        .clip(RoundedCornerShape(4.dp))
+                        .pointerInput(Unit) {
+                            awaitPointerEventScope {
+                                while (true) {
+                                    val event = awaitPointerEvent()
+                                    when {
+                                        event.changes.any { it.pressed && !isBackwardPressed } -> {
+                                            isBackwardPressed = true
+                                            Log.d("Bluetooth", "Nhấn nút Lùi")
+                                        }
+                                        event.changes.any { !it.pressed && isBackwardPressed } -> {
+                                            isBackwardPressed = false
+                                            Log.d("Bluetooth", "Thả nút Lùi, gửi lệnh dừng")
+                                        }
+                                    }
+                                }
+                            }
+                        },
                     colors = ButtonDefaults.buttonColors(containerColor = Color(0xFFB0BEC5))
                 ) {
                     Icon(
@@ -364,7 +507,7 @@ fun ControlScreen(
                 }
             }
 
-            // Phần 2: Nút Ngắt kết nối, biểu tượng xe và 2 nút Còi/Đèn (chiếm 1/5 không gian)
+            // Phần 2: Nút Ngắt kết nối, biểu tượng xe và 2 nút Còi/Đèn (chiếm 3/11 không gian)
             Column(
                 modifier = Modifier
                     .weight(3f)
@@ -385,18 +528,20 @@ fun ControlScreen(
                 }
 
                 // Biểu tượng xe
-                Box(
-                    modifier = Modifier
-                        .size(80.dp)
-                        .clip(CircleShape)
-                        .background(Color(0xFFB0BEC5)),
-                    contentAlignment = Alignment.Center
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.Center
                 ) {
-                    Icon(
-                        imageVector = Icons.Default.DirectionsCar,
-                        contentDescription = "Xe",
-                        modifier = Modifier.size(40.dp),
-                        tint = Color.Black
+                    Text(
+                        text = "Auto: ",
+                        fontSize = 16.sp,
+                        color = Color.Black
+                    )
+                    Switch(
+                        checked = isSwitchOn,
+                        onCheckedChange = { isSwitchOn = it },
+                        modifier = Modifier
+                            .scale(1.2f) // Tăng kích thước Switch nếu cần
                     )
                 }
                 Spacer(modifier = Modifier.height(16.dp))
@@ -406,11 +551,28 @@ fun ControlScreen(
                     verticalAlignment = Alignment.CenterVertically
                 ) {
                     Button(
-                        onClick = { onSendCommand("5") },
-                        onClickReleased = { /* Không cần gửi lệnh khi thả */ },
+                        onClick = { /* Xử lý qua pointerInput */ },
+                        onClickReleased = { /* Xử lý qua pointerInput */ },
                         modifier = Modifier
-                            .size(80.dp) // Thu nhỏ để vừa không gian ngang
-                            .clip(CircleShape),
+                            .size(80.dp)
+                            .clip(CircleShape)
+                            .pointerInput(Unit) {
+                                awaitPointerEventScope {
+                                    while (true) {
+                                        val event = awaitPointerEvent()
+                                        when {
+                                            event.changes.any { it.pressed && !isHornPressed } -> {
+                                                isHornPressed = true
+                                                Log.d("Bluetooth", "Nhấn nút Còi")
+                                            }
+                                            event.changes.any { !it.pressed && isHornPressed } -> {
+                                                isHornPressed = false
+                                                Log.d("Bluetooth", "Thả nút Còi")
+                                            }
+                                        }
+                                    }
+                                }
+                            },
                         colors = ButtonDefaults.buttonColors(containerColor = Color(0xFFB0BEC5))
                     ) {
                         Text(
@@ -420,12 +582,31 @@ fun ControlScreen(
                     }
 
                     Button(
-                        onClick = { onSendCommand("6") },
-                        onClickReleased = { /* Không cần gửi lệnh khi thả */ },
+                        onClick = { /* Xử lý qua pointerInput */ },
+                        onClickReleased = { /* Xử lý qua pointerInput */ },
                         modifier = Modifier
                             .size(80.dp)
-                            .clip(CircleShape),
-                        colors = ButtonDefaults.buttonColors(containerColor = Color(0xFFB0BEC5))
+                            .clip(CircleShape)
+                            .pointerInput(Unit) {
+                                awaitPointerEventScope {
+                                    while (true) {
+                                        val event = awaitPointerEvent()
+                                        when {
+                                            event.changes.any { it.pressed && !isLightOn } -> {
+                                                isLightOn = true
+                                                Log.d("Bluetooth", "Nhấn nút Đèn")
+                                            }
+                                            event.changes.any { !it.pressed && isLightOn } -> {
+                                                isLightOn = false
+                                                Log.d("Bluetooth", "Thả nút Đèn")
+                                            }
+                                        }
+                                    }
+                                }
+                            },
+                        colors = ButtonDefaults.buttonColors(
+                            containerColor = if (isLightOn) Color.Yellow else Color(0xFFB0BEC5)
+                        )
                     ) {
                         Text(
                             text = "💡",
@@ -435,7 +616,7 @@ fun ControlScreen(
                 }
             }
 
-            // Phần 3: Nút Trái và Phải (chiếm 2/5 không gian)
+            // Phần 3: Nút Trái và Phải (chiếm 4/11 không gian)
             Row(
                 modifier = Modifier
                     .weight(4f)
@@ -444,11 +625,28 @@ fun ControlScreen(
                 verticalAlignment = Alignment.CenterVertically
             ) {
                 Button(
-                    onClick = { onSendCommand("L") },
-                    onClickReleased = { onSendCommand("S") },
+                    onClick = { /* Xử lý qua pointerInput */ },
+                    onClickReleased = { /* Xử lý qua pointerInput */ },
                     modifier = Modifier
                         .size(width = 130.dp, height = 270.dp)
-                        .clip(RoundedCornerShape(4.dp)),
+                        .clip(RoundedCornerShape(4.dp))
+                        .pointerInput(Unit) {
+                            awaitPointerEventScope {
+                                while (true) {
+                                    val event = awaitPointerEvent()
+                                    when {
+                                        event.changes.any { it.pressed && !isLeftPressed } -> {
+                                            isLeftPressed = true
+                                            Log.d("Bluetooth", "Nhấn nút Trái")
+                                        }
+                                        event.changes.any { !it.pressed && isLeftPressed } -> {
+                                            isLeftPressed = false
+                                            Log.d("Bluetooth", "Thả nút Trái, kiểm tra Tiến/Lùi")
+                                        }
+                                    }
+                                }
+                            }
+                        },
                     colors = ButtonDefaults.buttonColors(containerColor = Color(0xFFB0BEC5))
                 ) {
                     Icon(
@@ -460,11 +658,29 @@ fun ControlScreen(
                 }
 
                 Button(
-                    onClick = { onSendCommand("R") },
-                    onClickReleased = { onSendCommand("S") },
+                    onClick = { /* Xử lý qua pointerInput */ },
+                    onClickReleased = { /* Xử lý qua pointerInput */ },
                     modifier = Modifier
                         .size(width = 130.dp, height = 270.dp)
-                        .clip(RoundedCornerShape(4.dp)),
+                        .clip(RoundedCornerShape(4.dp))
+                        .pointerInput(Unit) {
+                            awaitPointerEventScope {
+                                while (true) {
+                                    val event = awaitPointerEvent()
+                                    when {
+                                        event.changes.any { it.pressed && !isRightPressed } -> {
+                                            isRightPressed = true
+
+                                            Log.d("Bluetooth", "Nhấn nút Phải")
+                                        }
+                                        event.changes.any { !it.pressed && isRightPressed } -> {
+                                            isRightPressed = false
+                                            Log.d("Bluetooth", "Thả nút Phải, kiểm tra Tiến/Lùi")
+                                        }
+                                    }
+                                }
+                            }
+                        },
                     colors = ButtonDefaults.buttonColors(containerColor = Color(0xFFB0BEC5))
                 ) {
                     Icon(
@@ -478,6 +694,7 @@ fun ControlScreen(
         }
     }
 }
+
 @Composable
 fun Button(
     onClick: () -> Unit,
@@ -516,7 +733,6 @@ fun Button(
     }
 }
 
-
 @Preview(
     name = "Control Screen Preview",
     widthDp = 800,
@@ -531,4 +747,3 @@ fun ControlScreenPreview() {
         )
     }
 }
-
